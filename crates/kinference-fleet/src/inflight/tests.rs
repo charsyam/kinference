@@ -259,3 +259,47 @@ fn a_scan_that_jumps_across_uniform_hashes_still_counts_every_match() {
     let got = p.overlaps_for("a:1", &query.into_iter().collect())[0].overlap_blocks;
     assert_eq!(got, expected);
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx2_counts_unsigned_values_and_partial_blocks() {
+    if !std::arch::is_x86_feature_detected!("avx2") {
+        return;
+    }
+    let values = [
+        0,
+        1,
+        u64::MAX,
+        1 << 63,
+        (1 << 63) - 1,
+        u64::MAX - 1,
+        17,
+        17,
+        42,
+        0,
+        1 << 63,
+        100,
+        200,
+        300,
+        400,
+        500,
+    ];
+    for start in 0..=values.len() {
+        for end in start..=values.len() {
+            for y in [
+                0,
+                1,
+                17,
+                42,
+                (1 << 63) - 1,
+                1 << 63,
+                (1 << 63) + 1,
+                u64::MAX,
+            ] {
+                let block = &values[start..end];
+                let expected = block.iter().filter(|&&x| x < y).count();
+                assert_eq!(unsafe { count_less_avx2(block, y) }, expected);
+            }
+        }
+    }
+}

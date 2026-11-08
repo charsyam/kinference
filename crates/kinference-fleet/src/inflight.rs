@@ -194,14 +194,29 @@ impl InflightDispatch {
         n
     }
 
-    /// Each search moves forward from where the last one ended, one block of
-    /// `SCAN_BLOCK` entries at a time, so it reads the run in order. Within the
-    /// last block it counts the smaller entries without branching, which the
-    /// compiler vectorizes. Across a wide gap it first jumps to
-    /// `y * len / 2^64`, which is close to `y`'s place because block hashes
-    /// are uniform over `u64`. The jump never lands behind the last match, so
-    /// clustered hashes only fall back to the scan.
+    /// The search scans forward in blocks and counts smaller entries without
+    /// branching. AVX2 counts full blocks on supported x86-64 CPUs.
+    /// Uniform hashes permit a jump to `y * len / 2^64` when the preceding
+    /// hash is smaller than `y`. The scan handles clustered hashes in order.
     fn overlap_by_search(&self, query: &[u64]) -> u32 {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // Feature detection guards every call to the AVX2 implementation.
+            return unsafe { self.overlap_by_search_avx2(query) };
+        }
+        self.overlap_by_search_with(query, |block, y| {
+            block.iter().map(|&x| (x < y) as usize).sum()
+        })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn overlap_by_search_avx2(&self, query: &[u64]) -> u32 {
+        self.overlap_by_search_with(query, |block, y| unsafe { count_less_avx2(block, y) })
+    }
+
+    #[inline(always)]
+    fn overlap_by_search_with(&self, query: &[u64], count: impl Fn(&[u64], u64) -> usize) -> u32 {
         let a = &self.hashes.0;
         let (mut lo, mut n) = (0usize, 0u32);
         for &y in query {
@@ -213,7 +228,7 @@ impl InflightDispatch {
                 lo += SCAN_BLOCK;
             }
             let end = (lo + SCAN_BLOCK).min(a.len());
-            lo += a[lo..end].iter().map(|&x| (x < y) as usize).sum::<usize>();
+            lo += count(&a[lo..end], y);
             if lo == a.len() {
                 break;
             }
@@ -235,6 +250,32 @@ impl InflightDispatch {
         }
         n
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn count_less_avx2(block: &[u64], y: u64) -> usize {
+    use std::arch::x86_64::*;
+
+    if block.len() != SCAN_BLOCK {
+        return block.iter().map(|&x| (x < y) as usize).sum();
+    }
+    let sign = _mm256_set1_epi64x(i64::MIN);
+    let bound = _mm256_xor_si256(_mm256_set1_epi64x(y as i64), sign);
+    let mut counts = _mm256_setzero_si256();
+    for offset in [0, 4, 8, 12] {
+        // The length check guarantees four readable values at each offset.
+        let values = unsafe { _mm256_loadu_si256(block.as_ptr().add(offset).cast()) };
+        // Flipping the sign bit maps unsigned order to signed order.
+        let less = _mm256_cmpgt_epi64(bound, _mm256_xor_si256(values, sign));
+        counts = _mm256_sub_epi64(counts, less);
+    }
+    let halves = _mm_add_epi64(
+        _mm256_castsi256_si128(counts),
+        _mm256_extracti128_si256::<1>(counts),
+    );
+    let sum = _mm_add_epi64(halves, _mm_unpackhi_epi64(halves, halves));
+    _mm_cvtsi128_si64(sum) as usize
 }
 
 /// One outstanding dispatch, without its hashes, for the picker's queue-cost
