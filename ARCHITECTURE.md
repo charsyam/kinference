@@ -212,6 +212,10 @@ and service have `test_support` modules for the same reason.
 `tests/e2e/smoke.sh` runs the real engine with dummy weights on a kind
 cluster.
 
+`tests/bench_inflight.py` runs the fleet's ignored tracker benchmarks in
+isolated processes and samples RSS. The runner pools completed picks to
+report throughput and latency percentiles.
+
 ## Where new code goes
 
 - A new signal for scoring. Collect it in the fleet, in `scrape` or
