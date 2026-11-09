@@ -7,7 +7,10 @@
 //! pool's `pick_lock` is inside it. What it reserves is released by the
 //! `Observations` part, or by `abort_request` when the caller gives up.
 
+use std::collections::HashMap;
 use std::time::Instant;
+
+use kinference_fleet::inflight::{BlockHashes, BlockQuery};
 
 use super::*;
 use crate::observations::PendingObservation;
@@ -614,6 +617,13 @@ impl KinferenceService {
         let inflight = &*pool.inflight;
         let pick_lock = &*pool.pick_lock;
         let inflight_enabled = picker_cfg.inflight_tracking;
+        // Built before the lock: the critical section only reads them.
+        let mut query_hashes: HashMap<u32, BlockQuery> = score_side
+            .hashes_by_block_size
+            .into_iter()
+            .map(|(size, hashes)| (size, BlockQuery::new(BlockHashes::new(hashes))))
+            .collect();
+        let no_query = BlockQuery::default();
 
         // The critical section: pick and state mutation.
         let chosen_endpoint: String;
@@ -633,31 +643,22 @@ impl KinferenceService {
             let mut scores = scores;
             let kv_blocks_per_worker: Vec<u32> = scores.iter().map(|s| s.matched_blocks).collect();
             let expected_overlap_alpha = pool.predictor.expected_overlap_alpha;
-            let dispatches_per_worker: Vec<Vec<kinference_fleet::inflight::DispatchSnapshot>> =
-                scores
-                    .iter()
-                    .map(|s| pool.inflight_prefixes.dispatches_for(&s.endpoint))
-                    .collect();
+            let overlaps_per_worker: Vec<Vec<kinference_fleet::inflight::DispatchOverlap>> = scores
+                .iter()
+                .map(|s| {
+                    let query = query_hashes.get(&s.block_size).unwrap_or(&no_query);
+                    pool.inflight_prefixes.overlaps_for(&s.endpoint, query)
+                })
+                .collect();
             let inflight_workload_per_worker: Vec<
                 Vec<kinference_fleet::inflight::InflightSummary>,
-            > = dispatches_per_worker
+            > = overlaps_per_worker
                 .iter()
-                .map(|d| d.iter().map(|s| s.summary()).collect())
+                .map(|d| d.iter().map(|o| o.summary).collect())
                 .collect();
-            let per_worker_dispatch_overlap: Vec<Vec<f32>> = scores
+            let per_worker_dispatch_overlap: Vec<Vec<f32>> = overlaps_per_worker
                 .iter()
-                .zip(dispatches_per_worker.iter())
-                .map(|(s, dispatches)| {
-                    let query_set: std::collections::HashSet<u64> = score_side
-                        .hashes_by_block_size
-                        .get(&s.block_size)
-                        .map(|v| v.iter().copied().collect())
-                        .unwrap_or_default();
-                    dispatches
-                        .iter()
-                        .map(|d| d.remaining.intersection(&query_set).count() as f32)
-                        .collect()
-                })
+                .map(|d| d.iter().map(|o| o.overlap_blocks as f32).collect())
                 .collect();
             let inflight_per_worker: Vec<u32> = if inflight_enabled {
                 scores.iter().map(|s| inflight.get(&s.endpoint)).collect()
@@ -666,7 +667,7 @@ impl KinferenceService {
             };
 
             let score_now = Instant::now();
-            let per_worker_dispatch_progress: Vec<Vec<f32>> = dispatches_per_worker
+            let per_worker_dispatch_progress: Vec<Vec<f32>> = inflight_workload_per_worker
                 .iter()
                 .map(|dispatches| {
                     let capacity = predictor_cfg.inflight_concurrent_capacity;
@@ -855,18 +856,15 @@ impl KinferenceService {
             if inflight_enabled {
                 inflight.inc(&chosen.endpoint);
             }
-            let chosen_hashes_u64 = score_side
-                .hashes_by_block_size
-                .get(&chosen.block_size)
-                .cloned()
+            let chosen_hashes = query_hashes
+                .remove(&chosen.block_size)
+                .map(BlockQuery::into_hashes)
                 .unwrap_or_default();
-            let chosen_hashes_set: std::collections::HashSet<u64> =
-                chosen_hashes_u64.into_iter().collect();
             let chosen_uncached = chosen.total_blocks.saturating_sub(chosen.matched_blocks);
             pool.inflight_prefixes.insert(
                 req.request_id,
                 chosen.endpoint.clone(),
-                chosen_hashes_set,
+                chosen_hashes,
                 chosen_uncached,
                 chosen.total_blocks,
             );

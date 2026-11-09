@@ -635,13 +635,7 @@ fn best_group(
             .scores
             .iter()
             .map(|s| {
-                let summaries: Vec<kinference_fleet::inflight::InflightSummary> = group
-                    .pool
-                    .inflight_prefixes
-                    .dispatches_for(&s.endpoint)
-                    .iter()
-                    .map(|d| d.summary())
-                    .collect();
+                let summaries = group.pool.inflight_prefixes.summaries_for(&s.endpoint);
                 let ms =
                     crate::picker::predicted_wait_ms(s, &group.pool.predictor, &summaries, now)
                         .total_ms();

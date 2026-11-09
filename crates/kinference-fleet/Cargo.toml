@@ -25,6 +25,7 @@ prometheus-parse.workspace = true
 prometheus.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 kinference-policy = { workspace = true, features = ["test-util"] }
 

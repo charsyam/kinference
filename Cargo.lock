@@ -1861,6 +1861,7 @@ dependencies = [
  "prometheus-parse",
  "reqwest",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
